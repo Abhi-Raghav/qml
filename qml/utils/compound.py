@@ -45,7 +45,7 @@ class Compound(object):
         :type xyz: string
     """
 
-    def __init__(self, xyz = None):
+    def __init__(self, xyz = None, fractional_coords=False):
 
         empty_array = np.asarray([], dtype = float)
 
@@ -69,6 +69,9 @@ class Compound(object):
 
         # Representations:
         self.representation = empty_array
+
+        # For crystals, coordinates may be in fractional coordinates
+        self.fractional_coords = fractional_coords
 
         if xyz is not None:
             self.read_xyz(xyz)
@@ -254,7 +257,7 @@ class Compound(object):
     :type size: integer
     """
         self.representation = generate_fchl_representation(self.coordinates,
-                self.nuclear_charges, max_size=max_size, cell=cell, neighbors=neighbors,cut_distance=cut_distance)
+                self.nuclear_charges, max_size=max_size, cell=cell, neighbors=neighbors,cut_distance=cut_distance,fractional_coords=self.fractional_coords)
 
         assert (self.representation).shape[0] == max_size, "ERROR: Check FCHL descriptor size!"
 

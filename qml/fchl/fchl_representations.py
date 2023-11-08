@@ -29,7 +29,7 @@ from qml.utils.alchemy import get_alchemy
 from qml.utils import ELEMENT_NAME
 
 def generate_representation(coordinates, nuclear_charges,
-        max_size=23, neighbors=23, cut_distance = 5.0, cell=None):
+        max_size=23, neighbors=23, cut_distance = 5.0, cell=None, fractional_coords=False):
     """ Generates a representation for the FCHL kernel module.
 
     :param coordinates: Input coordinates.
@@ -59,7 +59,8 @@ def generate_representation(coordinates, nuclear_charges,
     M =  np.zeros((size,5,neighbors))
 
     if cell is not None:
-        coords = np.dot(coords,cell)
+        if fractional_coords:
+            coords = np.dot(coords,cell)
         nExtend = (np.floor(cut_distance/np.linalg.norm(cell,2,axis = 0)) + 1).astype(int)
 
         for i in range(-nExtend[0],nExtend[0] + 1):
