@@ -43,6 +43,46 @@ function decay(r, invrc, natoms) result(f)
 
 end function decay
 
+! function decay_pbc(r, invrc, natoms, natomsExt) result(f)
+
+!     implicit none
+
+!     double precision, intent(in), dimension(:,:) :: r
+!     double precision, intent(in) :: invrc
+!     integer, intent(in) :: natoms, natomsExt
+!     double precision, dimension(natoms, natomsExt) :: f
+
+!     double precision, parameter :: pi = 4.0d0 * atan(1.0d0)
+
+
+!     ! Decaying function reaching 0 at rc
+!     f = 0.5d0 * (cos(pi * r * invrc) + 1.0d0)
+
+
+! end function decay_pbc
+
+! function is_almost_zero(value, tolerance) result(result)
+    
+!     implicit none
+  
+!     double precision, intent(in) :: value
+!     double precision, intent(in), optional :: tolerance
+!     logical :: result
+  
+!     double precision, parameter :: default_tolerance = 1.0e-7
+!     double precision :: eps
+  
+!     ! Use the provided tolerance or the default if not specified
+!     if (present(tolerance)) then
+!       eps = tolerance
+!     else
+!       eps = default_tolerance
+!     end if
+  
+!     ! Check if the value is almost zero
+!     result = abs(value) < eps
+! end function is_almost_zero
+
 function calc_angle(a, b, c) result(angle)
 
     implicit none
@@ -858,6 +898,245 @@ subroutine fgenerate_fchl_acsf(coordinates, nuclear_charges, elements, &
     deallocate(angular)
 
 end subroutine fgenerate_fchl_acsf
+
+subroutine fgenerate_fchl_acsf_pbc(coordinatesExt, nuclear_charges, &
+                          & nuclear_chargesExt, elements, &
+                          & Rs2, Rs3, Ts, eta2, eta3, zeta, rcut, acut, natoms, &
+                          & natomsExt, unit_loc_index, rep_size, &
+                          & two_body_decay, three_body_decay, three_body_weight, rep)
+
+    use acsf_utils, only: decay, calc_angle, calc_cos_angle
+
+    implicit none
+
+    double precision, intent(in), dimension(:, :) :: coordinatesExt ! Cartesian
+    integer, intent(in), dimension(:) :: nuclear_charges
+    integer, intent(in), dimension(:) :: nuclear_chargesExt
+    integer, intent(in), dimension(:) :: elements
+    double precision, intent(in), dimension(:) :: Rs2
+    double precision, intent(in), dimension(:) :: Rs3
+    double precision, intent(in), dimension(:) :: Ts
+    double precision, intent(in) :: eta2
+    double precision, intent(in) :: eta3
+    double precision, intent(in) :: zeta
+    double precision, intent(in) :: rcut
+    double precision, intent(in) :: acut
+    integer, intent(in) :: natoms, natomsExt, unit_loc_index
+    integer, intent(in) :: rep_size
+    double precision, intent(in) :: two_body_decay
+    double precision, intent(in) :: three_body_decay
+    double precision, intent(in) :: three_body_weight
+
+    double precision, intent(out), dimension(natoms, rep_size) :: rep
+
+    integer :: i, j, k, l, n, m, o, p, q, s, z, nelements, nbasis2, nbasis3, nabasis
+    integer, allocatable, dimension(:) :: element_typesExt
+    double precision :: rij, rik, angle, cos_1, cos_2, cos_3, invcut
+    ! double precision :: angle_1, angle_2, angle_3
+    double precision, allocatable, dimension(:) :: radial, angular, a, b, c
+    double precision, allocatable, dimension(:, :) :: distance_matrixExt, rdecay, rep3
+
+    double precision :: mu, sigma, ksi3
+
+    double precision, parameter :: pi = 4.0d0 * atan(1.0d0)
+
+    if (natoms /= size(nuclear_charges, dim=1)) then
+        write(*,*) "ERROR: Atom Centered Symmetry Functions creation"
+        write(*,*) natoms, "coordinates, but", &
+            & size(nuclear_charges, dim=1), "atom_types!"
+        stop
+    endif
+
+
+    ! number of element types
+    nelements = size(elements)
+
+    ! Allocate temporary
+    allocate(element_typesExt(natomsExt))
+
+    ! Store element index of every atom in the extended list
+    !$OMP PARALLEL DO
+    do i = 1, natomsExt
+        do j = 1, nelements
+            if (nuclear_chargesExt(i) .eq. elements(j)) then
+                element_typesExt(i) = j
+                continue
+            endif
+        enddo
+    enddo
+    !$OMP END PARALLEL DO
+
+    ! Get distance matrix extended
+    ! Allocate temporary
+    allocate(distance_matrixExt(natomsExt, natomsExt))
+    distance_matrixExt = 0.0d0
+
+    !$OMP PARALLEL DO PRIVATE(rij)
+    do i = 1, natomsExt
+        do j = 1, natomsExt
+            rij = norm2(coordinatesExt(j,:) - coordinatesExt(i,:))
+            distance_matrixExt(i, j) = rij
+            distance_matrixExt(j, i) = rij
+        enddo
+    enddo
+    !$OMP END PARALLEL DO
+
+    ! To print stuff!
+    ! do i = 1, natoms
+    !     do j = 1, natomsExt
+    !       write(*, '(F8.2, " ")', advance="no") distance_matrixExt(i, j)
+    !     end do
+    !     write(*, *) ! Move to the next line after each row
+    ! end do
+    !number of basis functions in the two body term
+    
+    nbasis2 = size(Rs2)
+
+    ! Inverse of the two body cutoff
+    invcut = 1.0d0 / rcut
+
+    ! pre-calculate the radial decay in the two body terms
+    rdecay = decay(distance_matrixExt, invcut, natomsExt)
+
+    ! Allocate temporary
+    allocate(radial(nbasis2))
+
+    radial = 0.0d0
+
+    !$OMP PARALLEL DO PRIVATE(n,m,rij,mu,sigma,radial) REDUCTION(+:rep)
+    do i = unit_loc_index+1, unit_loc_index+natoms
+        ! index of the element of atom i
+        m = element_typesExt(i)
+        do j = 1, natomsExt
+            ! index of the element of atom j
+            n = element_typesExt(j)
+            rij = distance_matrixExt(i,j)
+
+            if (j == i) cycle
+
+            if (rij <= rcut) then
+                ! two body term of the representation
+                mu    = log(rij / sqrt(1.0d0 + eta2  / rij**2))
+                sigma = sqrt(log(1.0d0 + eta2  / rij**2))
+                radial(:) = 0.0d0
+
+                do k = 1, nbasis2 
+                   radial(k) = 1.0d0/(sigma* sqrt(2.0d0*pi) * Rs2(k)) * rdecay(i,j) &
+                              & * exp( - (log(Rs2(k)) - mu)**2 / (2.0d0 * sigma**2) ) / rij**two_body_decay
+                enddo
+                rep(i-unit_loc_index, (n-1)*nbasis2 + 1:n*nbasis2) = rep(i-unit_loc_index, (n-1)*nbasis2 + 1:n*nbasis2) + radial
+            endif
+        enddo
+    enddo
+    !$OMP END PARALLEL DO
+
+    deallocate(radial)
+
+    ! number of radial basis functions in the three body term
+    nbasis3 = size(Rs3)
+    ! number of radial basis functions in the three body term
+    nabasis = size(Ts)
+
+    ! Inverse of the three body cutoff
+    invcut = 1.0d0 / acut
+
+    ! pre-calculate the radial decay for pbc in the three body terms
+    rdecay = decay(distance_matrixExt, invcut, natomsExt)
+
+    ! Allocate temporary
+    allocate(rep3(natoms,rep_size))
+    allocate(a(3))
+    allocate(b(3))
+    allocate(c(3))
+    allocate(radial(nbasis3))
+    allocate(angular(nabasis))
+
+    rep3 = 0.0d0
+
+    ! descr_size = n_elements * nRs2 + (n_elements * (n_elements + 1)) * nRs3* nFourier
+    ! This could probably be done more efficiently if it's a bottleneck
+    ! Also the order is a bit wobbly compared to the tensorflow implementation
+    !$OMP PARALLEL DO PRIVATE(rij, n, rik, m, a, b, c, angle, radial, angular, &
+    !$OMP cos_1, cos_2, cos_3, mu, sigma, o, ksi3, &
+    !$OMP p, q, s, z) REDUCTION(+:rep3) COLLAPSE(2) SCHEDULE(dynamic)
+    do i = unit_loc_index+1, unit_loc_index+natoms
+        do j = 1, natomsExt - 1
+            ! distance between atoms i and j
+            rij = distance_matrixExt(i,j)
+
+            if (j == i) cycle
+            if (rij > acut)  cycle
+            ! index of the element of atom j
+            n = element_typesExt(j)
+            do k = j + 1, natomsExt
+                if (k == i) cycle
+                if (k == j) cycle
+                ! distance between atoms i and k
+                rik = distance_matrixExt(i,k)
+                if (rik > acut) cycle
+                ! index of the element of atom k
+                m = element_typesExt(k)
+                ! coordinates of atoms j, i, k
+                a = coordinatesExt(j,:)
+                b = coordinatesExt(i,:)
+                c = coordinatesExt(k,:)
+                ! angle between atoms i, j and k centered on i
+                angle = calc_angle(a,b,c)
+                cos_1 = calc_cos_angle(a,b,c)
+                cos_2 = calc_cos_angle(a,c,b)
+                cos_3 = calc_cos_angle(b,a,c)
+
+                ! The radial part of the three body terms including decay
+                radial = exp(-eta3*(0.5d0 * (rij+rik) - Rs3)**2) * rdecay(i,j) * rdecay(i,k)
+               
+                ksi3 = (1.0d0 + 3.0d0 * cos_1 * cos_2 * cos_3) &
+                     & / (distance_matrixExt(i,k) * distance_matrixExt(i,j) * distance_matrixExt(j,k) &
+                 & )**three_body_decay * three_body_weight
+
+                angular = 0.0d0 
+                do l = 1, nabasis/2
+
+                    o = l*2-1
+                    angular(2*l-1) = angular(2*l-1) + 2*cos(o * angle) &
+                        & * exp(-(zeta * o)**2 /2)
+                    
+                    angular(2*l) = angular(2*l) + 2*sin(o * angle) &
+                        & * exp(-(zeta * o)**2 /2)
+
+                enddo
+                
+                ! The lowest of the element indices for atoms j and k
+                p = min(n,m) - 1
+                ! The highest of the element indices for atoms j and k
+                q = max(n,m) - 1
+                ! calculate the indices that the three body terms should be added to
+                s = nelements * nbasis2 + nbasis3 * nabasis * (-(p * (p + 1))/2 + q + nelements * p) + 1
+
+                do l = 1, nbasis3
+                    ! calculate the indices that the three body terms should be added to
+                    z = s + (l-1) * nabasis
+                    ! Add the contributions from atoms i,j and k
+                    rep3(i-unit_loc_index, z:z + nabasis - 1) = rep3(i-unit_loc_index, z:z + nabasis - 1) &
+                    & + angular * radial(l) * ksi3
+                enddo
+            enddo
+        enddo
+    enddo
+    !$OMP END PARALLEL DO
+
+    rep = rep + rep3
+
+    deallocate(element_typesExt)
+    deallocate(rdecay)
+    deallocate(distance_matrixExt)
+    deallocate(rep3)
+    deallocate(a)
+    deallocate(b)
+    deallocate(c)
+    deallocate(radial)
+    deallocate(angular)
+
+end subroutine fgenerate_fchl_acsf_pbc
 
 subroutine fgenerate_fchl_acsf_and_gradients(coordinates, nuclear_charges, elements, &
                     & Rs2, Rs3, Ts, eta2, eta3, zeta, rcut, acut, natoms, rep_size, &

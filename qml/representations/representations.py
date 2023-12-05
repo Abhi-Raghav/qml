@@ -24,6 +24,8 @@ from __future__ import print_function
 
 import numpy as np
 import itertools as itl
+import copy
+from ase import Atoms
 
 from .frepresentations import fgenerate_coulomb_matrix
 from .frepresentations import fgenerate_unsorted_coulomb_matrix
@@ -39,7 +41,7 @@ from .slatm import get_sbop
 from .slatm import get_sbot
 
 from .facsf import fgenerate_acsf, fgenerate_acsf_and_gradients
-from .facsf import fgenerate_fchl_acsf, fgenerate_fchl_acsf_and_gradients
+from .facsf import fgenerate_fchl_acsf, fgenerate_fchl_acsf_pbc, fgenerate_fchl_acsf_and_gradients
 
 def vector_to_matrix(v):
     """ Converts a representation from 1D vector to 2D square matrix.
@@ -701,7 +703,130 @@ def generate_fchl_acsf(nuclear_charges, coordinates, elements = [1,6,7,8,16],
     else:
 
         if (nFourier > 1):
-            print("Error: FCHL-ACSF only supports nFourier=1, requested", nfourier)
+            print("Error: FCHL-ACSF only supports nFourier=1, requested", nFourier)
+            exit()
+
+        (rep, grad) = fgenerate_fchl_acsf_and_gradients(coordinates, nuclear_charges, elements, Rs2, Rs3,
+                Ts, eta2, eta3, zeta, rcut, acut, natoms, descr_size,
+                two_body_decay, three_body_decay, three_body_weight)
+
+
+        if pad is not False:
+            rep_pad  = np.zeros((pad, descr_size))
+            grad_pad = np.zeros((pad, descr_size, pad, 3))
+
+            rep_pad[:natoms,:] += rep
+            grad_pad[:natoms,:,:natoms,:] += grad
+
+            return rep_pad, grad_pad
+        else:
+            return rep, grad
+        
+def generate_fchl_acsf_pbc(nuclear_charges, coordinates, elements = [1,57],
+        nRs2=24, nRs3=20, nFourier=1, eta2=0.32, eta3=2.7, zeta=np.pi, rcut=8.0, acut=8.0,
+        two_body_decay=1.8, three_body_decay=0.57, three_body_weight=13.4,
+        pad=False, gradients=False, cell=None):
+    """
+    
+    FCHL-ACSF
+
+    Reasonable hyperparameters:
+    
+    Sigma ~ 21.0
+    Lambda ~ 1e-8
+    Max singular value ~ 1e-12
+
+    :param nuclear_charges: List of nuclear charges.
+    :type nuclear_charges: numpy array
+    :param coordinates: Input coordinates (cartesian)
+    :type coordinates: numpy array
+    :param elements: list of unique nuclear charges (atom types)
+    :type elements: numpy array
+    :param nRs2: Number of gaussian basis functions in the two-body terms
+    :type nRs2: integer
+    :param nRs3: Number of gaussian basis functions in the three-body radial part
+    :type nRs3: integer
+    :param nFourier: Order of Fourier expansion 
+    :type nFourier: integer
+    :param eta2: Precision in the gaussian basis functions in the two-body terms
+    :type eta2: float
+    :param eta3: Precision in the gaussian basis functions in the three-body radial part
+    :type eta3: float
+    :param zeta: Precision parameter of basis functions in the three-body angular part
+    :type zeta: float
+    :param rcut: Cut-off radius of the two-body terms
+    :type rcut: float
+    :param acut: Cut-off radius of the three-body terms
+    :type acut: float
+    :param gradients: To return gradients or not
+    :type gradients: boolean
+    :param cell: Cell paramters (Cartesian)
+    :type cell: numpy array
+    :return: Atom-centered symmetry functions representation
+    :rtype: numpy array
+    """
+
+    Rs2 = np.linspace(0, rcut, 1+nRs2)[1:]
+    Rs3 = np.linspace(0, acut, 1+nRs3)[1:]
+
+    Ts = np.linspace(0, np.pi, 2*nFourier)
+    n_elements = len(elements)
+    natoms = len(coordinates)
+
+
+
+    # Extending the structure to deal with PBC
+    # Create ase atoms object
+    coords_tuples = [tuple(row) for row in coordinates]
+    ase_atoms = Atoms(cell=cell, positions=coords_tuples, numbers=nuclear_charges, pbc=True)
+    
+    # The get_scaled_positions with wrap will wrap atoms outside the box into inside the box
+    coordinates = np.dot(ase_atoms.get_scaled_positions(wrap=True), cell)
+    cut_distance = max(rcut, acut)
+    nExtend = (np.floor(cut_distance/np.linalg.norm(cell,2,axis = 0)) + 1).astype(int)
+    for i in range(-nExtend[0],nExtend[0] + 1):
+        for j in range(-nExtend[1],nExtend[1] + 1):
+            for k in range(-nExtend[2],nExtend[2] + 1):
+                if i == -nExtend[0] and j  == -nExtend[1] and k  == -nExtend[2]:
+                    coordinatesExt = coordinates + i*cell[0,:] + j*cell[1,:] + k*cell[2,:]
+                    nuclear_chargesExt = copy.copy(nuclear_charges)
+                else:
+                    nuclear_chargesExt = np.append(nuclear_chargesExt, nuclear_charges)
+                    coordinatesExt = np.append(coordinatesExt,coordinates + i*cell[0,:] + j*cell[1,:] + k*cell[2,:],axis = 0)
+    natomsExt = len(coordinatesExt)
+
+    # index (location) of the unit cell coordinates in the coordinatesExt (to be used later in the fortran function)
+    # just add the atom index of a certain atom in unit cell to unit_loc_index
+    # and you will get the new atom index for the same atom in the supercell 
+    unit_loc_index = natoms * (nExtend[0] * (2*nExtend[1]+1) * (2*nExtend[2]+1) + nExtend[1]*(2*nExtend[2] + 1) + nExtend[2])
+
+
+    descr_size = n_elements * nRs2 + (n_elements * (n_elements + 1))  * nRs3* nFourier
+
+    # Normalization constant for three-body 
+    three_body_weight = np.sqrt(eta3/np.pi) * three_body_weight
+
+
+    if gradients is False:
+
+        rep = fgenerate_fchl_acsf_pbc(coordinatesExt, nuclear_charges, nuclear_chargesExt, elements, Rs2, Rs3,
+                Ts, eta2, eta3, zeta, rcut, acut, natoms, natomsExt, unit_loc_index, descr_size,
+                two_body_decay, three_body_decay, three_body_weight)
+
+        if pad is not False:
+
+            rep_pad  = np.zeros((pad, descr_size))
+            rep_pad[:natoms,:] += rep
+
+            return rep_pad
+
+        else:
+            return rep
+
+    else:
+
+        if (nFourier > 1):
+            print("Error: FCHL-ACSF only supports nFourier=1, requested", nFourier)
             exit()
 
         (rep, grad) = fgenerate_fchl_acsf_and_gradients(coordinates, nuclear_charges, elements, Rs2, Rs3,
