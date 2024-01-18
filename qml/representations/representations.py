@@ -41,7 +41,7 @@ from .slatm import get_sbop
 from .slatm import get_sbot
 
 from .facsf import fgenerate_acsf, fgenerate_acsf_and_gradients
-from .facsf import fgenerate_fchl_acsf, fgenerate_fchl_acsf_pbc, fgenerate_fchl_acsf_and_gradients
+from .facsf import fgenerate_fchl_acsf, fgenerate_fchl_acsf_pbc, fgenerate_fchl_acsf_and_gradients, fgenerate_fchl_acsf_and_gradients_pbc
 
 def vector_to_matrix(v):
     """ Converts a representation from 1D vector to 2D square matrix.
@@ -722,7 +722,7 @@ def generate_fchl_acsf(nuclear_charges, coordinates, elements = [1,6,7,8,16],
         else:
             return rep, grad
         
-def generate_fchl_acsf_pbc(nuclear_charges, coordinates, elements = [1,57],
+def generate_fchl_acsf_pbc(nuclear_charges, coordinates, elements,
         nRs2=24, nRs3=20, nFourier=1, eta2=0.32, eta3=2.7, zeta=np.pi, rcut=8.0, acut=8.0,
         two_body_decay=1.8, three_body_decay=0.57, three_body_weight=13.4,
         pad=False, gradients=False, cell=None):
@@ -829,8 +829,8 @@ def generate_fchl_acsf_pbc(nuclear_charges, coordinates, elements = [1,57],
             print("Error: FCHL-ACSF only supports nFourier=1, requested", nFourier)
             exit()
 
-        (rep, grad) = fgenerate_fchl_acsf_and_gradients(coordinates, nuclear_charges, elements, Rs2, Rs3,
-                Ts, eta2, eta3, zeta, rcut, acut, natoms, descr_size,
+        (rep, grad) = fgenerate_fchl_acsf_and_gradients_pbc(coordinatesExt, nuclear_charges, nuclear_chargesExt, elements, Rs2, Rs3,
+                Ts, eta2, eta3, zeta, rcut, acut, natoms, natomsExt, unit_loc_index, descr_size,
                 two_body_decay, three_body_decay, three_body_weight)
 
 

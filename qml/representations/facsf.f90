@@ -960,7 +960,7 @@ subroutine fgenerate_fchl_acsf_pbc(coordinatesExt, nuclear_charges, &
         do j = 1, nelements
             if (nuclear_chargesExt(i) .eq. elements(j)) then
                 element_typesExt(i) = j
-                continue
+                exit
             endif
         enddo
     enddo
@@ -973,7 +973,7 @@ subroutine fgenerate_fchl_acsf_pbc(coordinatesExt, nuclear_charges, &
 
     !$OMP PARALLEL DO PRIVATE(rij)
     do i = 1, natomsExt
-        do j = 1, natomsExt
+        do j = i+1, natomsExt
             rij = norm2(coordinatesExt(j,:) - coordinatesExt(i,:))
             distance_matrixExt(i, j) = rij
             distance_matrixExt(j, i) = rij
@@ -1582,3 +1582,515 @@ subroutine fgenerate_fchl_acsf_and_gradients(coordinates, nuclear_charges, eleme
 
 
 end subroutine fgenerate_fchl_acsf_and_gradients
+
+subroutine fgenerate_fchl_acsf_and_gradients_pbc(coordinatesExt, nuclear_charges, &
+                    & nuclear_chargesExt, elements, &
+                    & Rs2, Rs3, Ts, eta2, eta3, zeta, rcut, acut, natoms, &
+                    & natomsExt, unit_loc_index, rep_size, &
+                    & two_body_decay, three_body_decay, three_body_weight, rep, grad)
+
+    use acsf_utils, only: decay, calc_angle, calc_cos_angle
+
+    implicit none
+
+    double precision, intent(in), dimension(:, :) :: coordinatesExt ! Cartesian
+    integer, intent(in), dimension(:) :: nuclear_charges, nuclear_chargesExt
+    integer, intent(in), dimension(:) :: elements
+    double precision, intent(in), dimension(:) :: Rs2
+    double precision, intent(in), dimension(:) :: Rs3
+    double precision, intent(in), dimension(:) :: Ts
+    double precision, intent(in) :: eta2
+    double precision, intent(in) :: eta3
+    double precision, intent(in) :: zeta
+    double precision, intent(in) :: rcut
+    double precision, intent(in) :: acut
+    
+    double precision, intent(in) :: two_body_decay
+    double precision, intent(in) :: three_body_decay
+    double precision, intent(in) :: three_body_weight
+
+    double precision :: mu, sigma, dx, exp_s2, scaling, dscal, ddecay
+    double precision :: cos_i, cos_j, cos_k
+    double precision, allocatable, dimension(:) :: exp_ln
+    double precision, allocatable, dimension(:) :: log_Rs2
+
+    integer, intent(in) :: natoms, natomsExt, unit_loc_index
+    integer, intent(in) :: rep_size
+    double precision, intent(out), dimension(natoms, rep_size) :: rep
+    double precision, intent(out), dimension(natoms, rep_size, natoms, 3) :: grad    ! Third dimension should be natomsExt ????
+
+    integer :: i, j, k, l, m, n,  p, q, s, t, z, nelements, nbasis2, nbasis3, nabasis, twobody_size
+    integer, allocatable, dimension(:) :: element_typesExt
+    double precision :: rij, rik, angle, dot, rij2, rik2, invrij, invrik, invrij2, invrik2, invcut
+    double precision, allocatable, dimension(:) :: radial_base, radial, angular, a, b, c, atom_rep
+    double precision, allocatable, dimension(:) :: angular_base, d_radial, d_radial_d_i
+    double precision, allocatable, dimension(:) :: d_radial_d_j, d_radial_d_k, d_ijdecay, d_ikdecay
+    double precision, allocatable, dimension(:) :: d_angular, part, radial_part
+    double precision, allocatable, dimension(:) :: d_angular_d_i, d_angular_d_j, d_angular_d_k
+    double precision, allocatable, dimension(:, :) :: distance_matrixExt, rdecay, sq_distance_matrixExt
+    double precision, allocatable, dimension(:, :) :: inv_distance_matrixExt, inv_sq_distance_matrixExt
+    double precision, allocatable, dimension(:, :, :) :: atom_grad
+
+    double precision :: atm, atm_i, atm_j, atm_k
+    double precision :: invrjk, invr_atm, vi, vj, vk
+    double precision, allocatable, dimension(:) :: d_atm_i, d_atm_j, d_atm_k
+    double precision, allocatable, dimension(:) :: d_atm_ii, d_atm_ji, d_atm_ki
+    double precision, allocatable, dimension(:) :: d_atm_ij, d_atm_jj, d_atm_kj
+    double precision, allocatable, dimension(:) :: d_atm_ik, d_atm_jk, d_atm_kk
+    double precision, allocatable, dimension(:) :: d_atm_i2, d_atm_j2, d_atm_k2
+    double precision, allocatable, dimension(:) :: d_atm_i3, d_atm_j3, d_atm_k3
+    double precision, allocatable, dimension(:) :: d_atm_extra_i, d_atm_extra_j, d_atm_extra_k
+
+    double precision, parameter :: pi = 4.0d0 * atan(1.0d0)
+
+    if (natoms /= size(nuclear_charges, dim=1)) then
+        write(*,*) "ERROR: Atom Centered Symmetry Functions creation"
+        write(*,*) natoms, "coordinates, but", &
+            & size(nuclear_charges, dim=1), "atom_types!"
+        stop
+    endif
+
+
+    ! Number of unique elements
+    nelements = size(elements)
+    ! write(*,*) nelements, "no of elements"
+
+    ! Allocate temporary
+    allocate(element_typesExt(natomsExt))
+
+    ! Store element index of every atom
+    !$OMP PARALLEL DO
+    do i = 1, natomsExt
+        do j = 1, nelements
+            if (nuclear_chargesExt(i) .eq. elements(j)) then
+                element_typesExt(i) = j
+                exit
+            endif
+        enddo
+    enddo
+    !$OMP END PARALLEL DO
+    ! write(*,*) "Element indexes for every atom stored"
+
+    ! Get distance matrix
+    ! Allocate temporary
+    allocate(distance_matrixExt(natomsExt, natomsExt))
+    allocate(sq_distance_matrixExt(natomsExt, natomsExt))
+    allocate(inv_distance_matrixExt(natomsExt, natomsExt))
+    allocate(inv_sq_distance_matrixExt(natomsExt, natomsExt))
+    allocate(rdecay(natomsExt, natomsExt))
+    distance_matrixExt = 0.0d0
+    sq_distance_matrixExt = 0.0d0
+    inv_distance_matrixExt = 0.0d0
+    inv_sq_distance_matrixExt = 0.0d0
+
+
+    !$OMP PARALLEL DO PRIVATE(rij,rij2,invrij,invrij2) SCHEDULE(dynamic)
+    do i = 1, natomsExt
+        do j = i+1, natomsExt
+            rij = norm2(coordinatesExt(j,:) - coordinatesExt(i,:))
+            distance_matrixExt(i, j) = rij
+            distance_matrixExt(j, i) = rij
+            rij2 = rij * rij
+            sq_distance_matrixExt(i, j) = rij2
+            sq_distance_matrixExt(j, i) = rij2
+            invrij = 1.0d0 / rij
+            inv_distance_matrixExt(i, j) = invrij
+            inv_distance_matrixExt(j, i) = invrij
+            invrij2 = invrij * invrij
+            inv_sq_distance_matrixExt(i, j) = invrij2
+            inv_sq_distance_matrixExt(j, i) = invrij2
+        enddo
+    enddo
+    !$OMP END PARALLEL DO
+    ! write(*,*) "Distance matrices computed successfully"
+
+    ! Number of two body basis functions
+    nbasis2 = size(Rs2)
+
+    ! Inverse of the two body cutoff distance
+    invcut = 1.0d0 / rcut
+    ! Pre-calculate the two body decay
+    rdecay = decay(distance_matrixExt, invcut, natomsExt)
+    ! write(*,*) "Decay matrix computed successfully"
+
+    ! Allocate temporary
+    allocate(radial_base(nbasis2))
+    allocate(radial(nbasis2))
+    allocate(radial_part(nbasis2))
+    allocate(part(nbasis2))
+    allocate(exp_ln(nbasis2))
+    allocate(log_Rs2(nbasis2))
+
+    grad =0.0d0
+    rep = 0.0d0
+
+    log_Rs2(:) = log(Rs2(:))
+
+    ! !$OMP PARALLEL DO PRIVATE(m,n,rij,invrij,mu,sigma,exp_s2,exp_ln,scaling, &
+    ! !$OMP radial_base,radial,dx,part, dscal,ddecay) REDUCTION(+:rep,grad) SCHEDULE(dynamic)
+    do i = unit_loc_index+1, unit_loc_index+natoms
+        ! The element index of atom i
+        m = element_typesExt(i)
+        do j = 1, natomsExt
+            ! The element index of atom j
+            n = element_typesExt(j)
+            ! Distance between atoms i and j
+            rij = distance_matrixExt(i,j)
+
+            if (j == i) cycle
+
+            if (rij <= rcut) then
+                invrij = inv_distance_matrixExt(i,j)
+
+                mu    = log(rij / sqrt(1.0d0 + eta2  * inv_sq_distance_matrixExt(i, j)))
+                sigma = sqrt(log(1.0d0 + eta2  * inv_sq_distance_matrixExt(i, j)))
+                exp_s2 = exp(sigma**2)
+                exp_ln = exp(-(log_Rs2(:) - mu)**2 / sigma**2 * 0.5d0) * sqrt(2.0d0)
+                
+                scaling = 1.0d0 / rij**two_body_decay
+
+                radial_base(:) = 1.0d0/(sigma* sqrt(2.0d0*pi) * Rs2(:)) * exp(-(log_Rs2(:) - mu)**2 / (2.0d0 * sigma**2))
+
+                radial(:) = radial_base(:) * scaling * rdecay(i,j) 
+                
+                rep(i-unit_loc_index, (n-1)*nbasis2 + 1:n*nbasis2) = rep(i-unit_loc_index, (n-1)*nbasis2 + 1:n*nbasis2) + radial
+                
+
+                do k = 1, 3
+
+                    dx = -(coordinatesExt(i,k) - coordinatesExt(j,k))
+                    
+                    part(:) = ((log_Rs2(:) - mu) * (-dx *(rij**2 * exp_s2 + eta2) / (rij * sqrt(exp_s2))**3) &
+                        &* sqrt(exp_s2) / (sigma**2 * rij) + (log_Rs2(:) - mu) ** 2 * eta2 * dx / &
+                        &(sigma**4 * rij**4 * exp_s2)) * exp_ln / (Rs2(:) * sigma  * sqrt(pi) * 2) &
+                        &- exp_ln  * eta2 * dx / (Rs2(:) * sigma**3 *sqrt(pi) * rij**4 * exp_s2 * 2.0d0)
+
+                    dscal = two_body_decay * dx / rij**(two_body_decay+2.0d0)
+                    ddecay = dx * 0.5d0 * pi * sin(pi*rij * invcut) * invcut * invrij
+
+                    part(:) = part(:) * scaling * rdecay(i,j) + radial_base(:) * dscal * rdecay(i,j) &
+                        & + radial_base(:) * scaling * ddecay
+
+                    ! The gradients wrt coordinates
+                    grad(i-unit_loc_index, (n-1)*nbasis2 + 1:n*nbasis2, i-unit_loc_index, k) = grad(i-unit_loc_index, (n-1)*nbasis2&
+                    & + 1:n*nbasis2, i-unit_loc_index, k) + part
+                    if ( j > unit_loc_index .and. j <= unit_loc_index+natoms ) then
+                        grad(i-unit_loc_index, (n-1)*nbasis2 + 1:n*nbasis2, j-unit_loc_index, k) = &
+                        & grad(i-unit_loc_index, (n-1)*nbasis2 + 1:n*nbasis2, j-unit_loc_index, k) - part
+                    end if
+                    !grad(i-unit_loc_index, (n-1)*nbasis2 + 1:n*nbasis2, j, k) = grad(i-unit_loc_index, (n-1)*nbasis2 + &
+                    !& 1:n*nbasis2, j, k) - part
+                    !grad(j, (m-1)*nbasis2 + 1:m*nbasis2, j, k) = grad(j, (m-1)*nbasis2 + 1:m*nbasis2, j, k) - part
+                    !grad(j, (m-1)*nbasis2 + 1:m*nbasis2, i, k) = grad(j, (m-1)*nbasis2 + 1:m*nbasis2, i, k) + part
+
+                enddo
+            endif
+        enddo
+    enddo
+    ! !$OMP END PARALLEL DO
+    ! write(*,*) "Two body terms and gradients computed successfully"
+
+    deallocate(radial_base)
+    deallocate(radial)
+    deallocate(radial_part)
+    deallocate(part)
+    deallocate(exp_ln)
+    deallocate(log_Rs2)
+
+    ! write(*,*) "Deallocation of temp. two body terms done"
+    
+
+    ! Number of radial basis functions in the three body term
+    nbasis3 = size(Rs3)
+    ! Number of angular basis functions in the three body term
+    nabasis = size(Ts)
+    ! Size of two body terms
+    twobody_size = nelements * nbasis2
+
+    ! Inverse of the three body cutoff distance
+    invcut = 1.0d0 / acut
+    ! Pre-calculate the three body decay
+    rdecay = decay(distance_matrixExt, invcut, natomsExt)
+    ! write(*,*) "rdecay computed"
+
+    ! Allocate temporary
+    allocate(atom_rep(rep_size - twobody_size))
+    !allocate(atom_grad(rep_size - twobody_size, natoms, 3))
+    allocate(atom_grad(rep_size - twobody_size, natoms, 3))
+    allocate(a(3))
+    allocate(b(3))
+    allocate(c(3))
+    allocate(radial(nbasis3))
+    allocate(radial_base(nbasis3))
+    allocate(angular_base(nabasis))
+    allocate(angular(nabasis))
+    allocate(d_angular(nabasis))
+    allocate(d_angular_d_i(3))
+    allocate(d_angular_d_j(3))
+    allocate(d_angular_d_k(3))
+    allocate(d_radial(nbasis3))
+    allocate(d_radial_d_i(3))
+    allocate(d_radial_d_j(3))
+    allocate(d_radial_d_k(3))
+    allocate(d_ijdecay(3))
+    allocate(d_ikdecay(3))
+
+    allocate(d_atm_i(3))
+    allocate(d_atm_j(3))
+    allocate(d_atm_k(3))
+    allocate(d_atm_ii(3))
+    allocate(d_atm_ij(3))
+    allocate(d_atm_ik(3))
+    allocate(d_atm_ji(3))
+    allocate(d_atm_jj(3))
+    allocate(d_atm_jk(3))
+    allocate(d_atm_ki(3))
+    allocate(d_atm_kj(3))
+    allocate(d_atm_kk(3))
+    allocate(d_atm_i2(3))
+    allocate(d_atm_j2(3))
+    allocate(d_atm_k2(3))
+    allocate(d_atm_i3(3))
+    allocate(d_atm_j3(3))
+    allocate(d_atm_k3(3))
+    allocate(d_atm_extra_i(3))
+    allocate(d_atm_extra_j(3))
+    allocate(d_atm_extra_k(3))
+
+    ! write(*,*) "Allocation of three body terms done"
+
+    ! This could probably be done more efficiently if it's a bottleneck
+    ! The order is a bit wobbly compared to the tensorflow implementation
+    ! !$OMP PARALLEL DO PRIVATE(atom_rep,atom_grad,a,b,c,radial,angular_base, &
+    ! !$OMP angular,d_angular,rij,n,rij2,invrij,invrij2,d_angular_d_i, &
+    ! !$OMP d_angular_d_j,d_angular_d_k,rik,m,rik2,invrik,invrik2,angle, &
+    ! !$OMP p,q,dot,d_radial,d_radial_d_i,d_radial_d_j,d_radial_d_k,s,z, &
+    ! !$OMP d_ijdecay,d_ikdecay) SCHEDULE(dynamic)
+    do i = unit_loc_index+1, unit_loc_index+natoms
+        atom_rep = 0.0d0
+        atom_grad = 0.0d0
+        do j = 1, natomsExt - 1
+            if (i .eq. j) cycle
+            ! distance between atom i and j
+            rij = distance_matrixExt(i,j)
+            if (rij > acut) cycle
+            ! index of the element of atom j
+            n = element_typesExt(j)
+            ! squared distance between atom i and j
+            rij2 = sq_distance_matrixExt(i,j)
+            ! inverse distance between atom i and j
+            invrij = inv_distance_matrixExt(i,j)
+            ! inverse squared distance between atom i and j
+            invrij2 = inv_sq_distance_matrixExt(i,j)
+            do k = j + 1, natomsExt
+                if (i .eq. k) cycle
+                ! distance between atom i and k
+                rik = distance_matrixExt(i,k)
+                if (rik > acut) cycle
+                ! index of the element of atom k
+                m = element_typesExt(k)
+                ! squared distance between atom i and k
+                rik2 = sq_distance_matrixExt(i,k)
+                ! inverse distance between atom i and k
+                invrik = inv_distance_matrixExt(i,k)
+                ! inverse distance between atom j and k
+                invrjk = inv_distance_matrixExt(j,k)
+                ! inverse squared distance between atom i and k
+                invrik2 = inv_sq_distance_matrixExt(i,k)
+                ! coordinates of atoms j, i, k
+                a = coordinatesExt(j,:)
+                b = coordinatesExt(i,:)
+                c = coordinatesExt(k,:)
+                ! angle between atom i, j and k, centered on i
+                angle = calc_angle(a,b,c)
+                cos_i = calc_cos_angle(a,b,c)
+                cos_k = calc_cos_angle(a,c,b)
+                cos_j = calc_cos_angle(b,a,c)
+                !write(*,*) "Angles calculated"
+                
+                ! part of the radial part of the 3body terms
+                radial_base(:) = exp(-eta3*(0.5d0 * (rij+rik) - Rs3(:))**2)
+                radial(:) = radial_base(:) ! * scaling
+
+                p = min(n,m) - 1
+                ! the highest index of the elements of j,k
+                q = max(n,m) - 1
+                ! Dot product between the vectors connecting atom i,j and i,k
+                dot = dot_product(a-b,c-b)
+                
+                angular(1)   =  exp(-(zeta**2)*0.5d0) * 2 * cos(angle)
+                angular(2)   =  exp(-(zeta**2)*0.5d0) * 2 * sin(angle)
+
+                d_angular(1) =  exp(-(zeta**2)*0.5d0) * 2 * sin(angle) / sqrt(max(1d-10, rij2 * rik2 - dot**2))
+                d_angular(2) = -exp(-(zeta**2)*0.5d0) * 2 * cos(angle) / sqrt(max(1d-10, rij2 * rik2 - dot**2))
+
+                ! Part of the derivative of the angular basis functions wrt atom j (dim(3))
+                d_angular_d_j = c - b + dot * ((b - a) * invrij2)
+                ! Part of the derivative of the angular basis functions wrt atom k (dim(3))
+                d_angular_d_k = a - b + dot * ((b - c) * invrik2)
+                ! Part of the derivative of the angular basis functions wrt atom i (dim(3))
+                d_angular_d_i = - (d_angular_d_j + d_angular_d_k)
+
+                ! Part of the derivative of the radial basis functions wrt coordinates (dim(nbasis3))
+                ! including decay
+                d_radial = radial * eta3 * (0.5d0 * (rij+rik) - Rs3) ! * rdecay(i,j) * rdecay(i,k)
+                ! Part of the derivative of the radial basis functions wrt atom j (dim(3))
+                d_radial_d_j = (b - a) * invrij
+                ! Part of the derivative of the radial basis functions wrt atom k (dim(3))
+                d_radial_d_k = (b - c) * invrik
+                ! Part of the derivative of the radial basis functions wrt atom i (dim(3))
+                d_radial_d_i = - (d_radial_d_j + d_radial_d_k)
+
+                ! Part of the derivative of the i,j decay functions wrt coordinates (dim(3))
+                d_ijdecay = - pi * (b - a) * sin(pi * rij * invcut) * 0.5d0 * invrij * invcut
+                ! Part of the derivative of the i,k decay functions wrt coordinates (dim(3))
+                d_ikdecay = - pi * (b - c) * sin(pi * rik * invcut) * 0.5d0 * invrik * invcut
+               
+                invr_atm = (invrij * invrjk *invrik)**three_body_decay
+
+                ! Axilrod-Teller-Muto term
+                atm = (1.0d0 + 3.0d0 * cos_i * cos_j * cos_k) * invr_atm * three_body_weight
+
+                atm_i = (3.0d0 * cos_j * cos_k) * invr_atm * invrij * invrik
+                atm_j = (3.0d0 * cos_k * cos_i) * invr_atm * invrij * invrjk
+                atm_k = (3.0d0 * cos_i * cos_j) * invr_atm * invrjk * invrik
+               
+                vi = dot_product(a-b,c-b)
+                vj = dot_product(c-a,b-a)
+                vk = dot_product(b-c,a-c)
+                
+                d_atm_ii(:) = 2 * b - a - c - vi * ((b-a)*invrij**2 + (b-c)*invrik**2)
+                d_atm_ij(:) = c - a - vj * (b-a)*invrij**2
+                d_atm_ik(:) = a - c - vk * (b-c)*invrik**2
+                
+                d_atm_ji(:) = c - b - vi * (a-b)*invrij**2
+                d_atm_jj(:) = 2 * a - b - c - vj * ((a-b)*invrij**2 + (a-c)*invrjk**2)
+                d_atm_jk(:) = b - c - vk * (a-c)*invrjk**2
+
+                d_atm_ki(:) = a - b - vi * (c-b)*invrik**2
+                d_atm_kj(:) = b - a - vj * (c-a)*invrjk**2
+                d_atm_kk(:) = 2 * c - a - b - vk * ((c-a)*invrjk**2 + (c-b)*invrik**2)
+
+                d_atm_extra_i(:) = ((a-b)*invrij**2 + (c-b)*invrik**2) * atm * three_body_decay / three_body_weight
+                d_atm_extra_j(:) = ((b-a)*invrij**2 + (c-a)*invrjk**2) * atm * three_body_decay / three_body_weight
+                d_atm_extra_k(:) = ((a-c)*invrjk**2 + (b-c)*invrik**2) * atm * three_body_decay / three_body_weight
+
+                ! Get index of where the contributions of atoms i,j,k should be added
+                s = nbasis3 * nabasis * (-(p * (p + 1))/2 + q + nelements * p) + 1
+
+                do l = 1, nbasis3
+
+                    ! Get index of where the contributions of atoms i,j,k should be added
+                    z = s + (l-1) * nabasis
+
+                    ! Add the contributions for atoms i,j,k
+                    atom_rep(z:z + nabasis - 1) = atom_rep(z:z + nabasis - 1) &
+                        & + angular * radial(l) * atm * rdecay(i,j) * rdecay(i,k)
+
+                    do t = 1, 3
+                        
+                        ! Add up all gradient contributions wrt atom i
+                        atom_grad(z:z + nabasis - 1, i-unit_loc_index, t) = atom_grad(z:z + nabasis - 1, i-unit_loc_index, t) + &
+                            & d_angular * d_angular_d_i(t) * radial(l) * atm * rdecay(i,j) * rdecay(i,k) + &
+                            & angular * d_radial(l) * d_radial_d_i(t) * atm * rdecay(i,j) * rdecay(i,k) + &
+                            & angular * radial(l) * (atm_i * d_atm_ii(t) + atm_j * d_atm_ij(t) &
+                            & + atm_k * d_atm_ik(t) + d_atm_extra_i(t)) * three_body_weight * rdecay(i,j) * rdecay(i,k) + &
+                            & angular * radial(l) * (d_ijdecay(t) * rdecay(i,k) + rdecay(i,j) * d_ikdecay(t)) * atm
+
+                        ! Add up all gradient contributions wrt atom j
+                        if ( j > unit_loc_index .and. j <= unit_loc_index+natoms ) then
+                            atom_grad(z:z + nabasis - 1, j-unit_loc_index, t) = &
+                            & atom_grad(z:z + nabasis - 1, j-unit_loc_index, t) + d_angular &
+                            & * d_angular_d_j(t) * radial(l) * atm * rdecay(i,j) * rdecay(i,k) + &
+                            & angular * d_radial(l) * d_radial_d_j(t) * atm * rdecay(i,j) * rdecay(i,k) + &
+                            & angular * radial(l) * (atm_i * d_atm_ji(t) + atm_j * d_atm_jj(t) &
+                            & + atm_k * d_atm_jk(t) + d_atm_extra_j(t)) * three_body_weight * &
+                            & rdecay(i,j) * rdecay(i,k) - &
+                            & angular * radial(l) * d_ijdecay(t) * rdecay(i,k) * atm
+                        end if
+                        ! atom_grad(z:z + nabasis - 1, j, t) = atom_grad(z:z + nabasis - 1, j, t) + &
+                        !     & d_angular * d_angular_d_j(t) * radial(l) * atm * rdecay(i,j) * rdecay(i,k) + &
+                        !     & angular * d_radial(l) * d_radial_d_j(t) * atm * rdecay(i,j) * rdecay(i,k) + &
+                        !     & angular * radial(l) * (atm_i * d_atm_ji(t) + atm_j * d_atm_jj(t) &
+                        !     & + atm_k * d_atm_jk(t) + d_atm_extra_j(t)) * three_body_weight * rdecay(i,j) * rdecay(i,k) - &
+                        !     & angular * radial(l) * d_ijdecay(t) * rdecay(i,k) * atm
+
+                        ! Add up all gradient contributions wrt atom k
+                        if ( k > unit_loc_index .and. k <= unit_loc_index+natoms ) then
+                            atom_grad(z:z + nabasis - 1, k-unit_loc_index, t) = &
+                            & atom_grad(z:z + nabasis - 1, k-unit_loc_index, t) + d_angular &
+                            & * d_angular_d_k(t) * radial(l) * atm * rdecay(i,j) * rdecay(i,k) + &
+                            & angular * d_radial(l) * d_radial_d_k(t) * atm * rdecay(i,j) * rdecay(i,k) + &
+                            & angular * radial(l) * (atm_i * d_atm_ki(t) + atm_j * d_atm_kj(t) &
+                            & + atm_k * d_atm_kk(t) + d_atm_extra_k(t)) * three_body_weight * & 
+                            & rdecay(i,j) * rdecay(i,k) - &
+                            & angular * radial(l) * rdecay(i,j) * d_ikdecay(t) * atm
+                        end if
+                        ! atom_grad(z:z + nabasis - 1, k, t) = atom_grad(z:z + nabasis - 1, k, t) + &
+                        !     & d_angular * d_angular_d_k(t) * radial(l) * atm * rdecay(i,j) * rdecay(i,k) + &
+                        !     & angular * d_radial(l) * d_radial_d_k(t) * atm * rdecay(i,j) * rdecay(i,k) + &
+                        !     & angular * radial(l) * (atm_i * d_atm_ki(t) + atm_j * d_atm_kj(t) &
+                        !     & + atm_k * d_atm_kk(t) + d_atm_extra_k(t)) * three_body_weight * rdecay(i,j) * rdecay(i,k) - &
+                        !     & angular * radial(l) * rdecay(i,j) * d_ikdecay(t) * atm
+                    
+                    enddo
+                enddo
+            enddo
+        enddo
+        rep(i-unit_loc_index, twobody_size + 1:) = rep(i-unit_loc_index, twobody_size + 1:) + atom_rep
+        grad(i-unit_loc_index, twobody_size + 1:,:,:) = grad(i-unit_loc_index, twobody_size + 1:,:,:) + atom_grad
+    enddo
+    ! !$OMP END PARALLEL DO
+    ! write(*,*) "Three body terms computed successfully"
+
+    deallocate(rdecay)
+    deallocate(element_typesExt)
+    deallocate(distance_matrixExt)
+    deallocate(inv_distance_matrixExt)
+    deallocate(sq_distance_matrixExt)
+    deallocate(inv_sq_distance_matrixExt)
+    deallocate(atom_rep)
+    deallocate(atom_grad)
+    deallocate(a)
+    deallocate(b)
+    deallocate(c)
+    deallocate(radial)
+    deallocate(radial_base)
+    deallocate(angular_base)
+    deallocate(angular)
+    deallocate(d_angular)
+    deallocate(d_angular_d_i)
+    deallocate(d_angular_d_j)
+    deallocate(d_angular_d_k)
+    deallocate(d_radial)
+    deallocate(d_radial_d_i)
+    deallocate(d_radial_d_j)
+    deallocate(d_radial_d_k)
+    deallocate(d_ijdecay)
+    deallocate(d_ikdecay)
+
+    deallocate(d_atm_i)
+    deallocate(d_atm_j)
+    deallocate(d_atm_k)
+    deallocate(d_atm_ii)
+    deallocate(d_atm_ij)
+    deallocate(d_atm_ik)
+    deallocate(d_atm_ji)
+    deallocate(d_atm_jj)
+    deallocate(d_atm_jk)
+    deallocate(d_atm_ki)
+    deallocate(d_atm_kj)
+    deallocate(d_atm_kk)
+    deallocate(d_atm_i2)
+    deallocate(d_atm_j2)
+    deallocate(d_atm_k2)
+    deallocate(d_atm_i3)
+    deallocate(d_atm_j3)
+    deallocate(d_atm_k3)
+    deallocate(d_atm_extra_i)
+    deallocate(d_atm_extra_j)
+    deallocate(d_atm_extra_k)
+    ! write(*,*) "Deallocation of temp. three body terms done"
+
+
+end subroutine fgenerate_fchl_acsf_and_gradients_pbc
