@@ -1003,7 +1003,7 @@ subroutine fgenerate_fchl_acsf_pbc(coordinatesExt, nuclear_charges, &
 
     radial = 0.0d0
 
-    !$OMP PARALLEL DO PRIVATE(n,m,rij,mu,sigma,radial) REDUCTION(+:rep)
+    !$OMP PARALLEL DO PRIVATE(n,m,rij,mu,sigma,radial) SCHEDULE(dynamic)
     do i = unit_loc_index+1, unit_loc_index+natoms
         ! index of the element of atom i
         m = element_typesExt(i)
@@ -1058,7 +1058,7 @@ subroutine fgenerate_fchl_acsf_pbc(coordinatesExt, nuclear_charges, &
     ! Also the order is a bit wobbly compared to the tensorflow implementation
     !$OMP PARALLEL DO PRIVATE(rij, n, rik, m, a, b, c, angle, radial, angular, &
     !$OMP cos_1, cos_2, cos_3, mu, sigma, o, ksi3, &
-    !$OMP p, q, s, z) REDUCTION(+:rep3) COLLAPSE(2) SCHEDULE(dynamic)
+    !$OMP p, q, s, z) SCHEDULE(dynamic)
     do i = unit_loc_index+1, unit_loc_index+natoms
         do j = 1, natomsExt - 1
             ! distance between atoms i and j
@@ -1726,8 +1726,8 @@ subroutine fgenerate_fchl_acsf_and_gradients_pbc(coordinatesExt, nuclear_charges
 
     log_Rs2(:) = log(Rs2(:))
 
-    ! !$OMP PARALLEL DO PRIVATE(m,n,rij,invrij,mu,sigma,exp_s2,exp_ln,scaling, &
-    ! !$OMP radial_base,radial,dx,part, dscal,ddecay) REDUCTION(+:rep,grad) SCHEDULE(dynamic)
+    !$OMP PARALLEL DO PRIVATE(m,n,rij,invrij,mu,sigma,exp_s2,exp_ln,scaling, &
+    !$OMP radial_base,radial,dx,part, dscal,ddecay) SCHEDULE(dynamic)
     do i = unit_loc_index+1, unit_loc_index+natoms
         ! The element index of atom i
         m = element_typesExt(i)
@@ -1787,7 +1787,7 @@ subroutine fgenerate_fchl_acsf_and_gradients_pbc(coordinatesExt, nuclear_charges
             endif
         enddo
     enddo
-    ! !$OMP END PARALLEL DO
+    !$OMP END PARALLEL DO
     ! write(*,*) "Two body terms and gradients computed successfully"
 
     deallocate(radial_base)
@@ -1861,11 +1861,13 @@ subroutine fgenerate_fchl_acsf_and_gradients_pbc(coordinatesExt, nuclear_charges
 
     ! This could probably be done more efficiently if it's a bottleneck
     ! The order is a bit wobbly compared to the tensorflow implementation
-    ! !$OMP PARALLEL DO PRIVATE(atom_rep,atom_grad,a,b,c,radial,angular_base, &
-    ! !$OMP angular,d_angular,rij,n,rij2,invrij,invrij2,d_angular_d_i, &
-    ! !$OMP d_angular_d_j,d_angular_d_k,rik,m,rik2,invrik,invrik2,angle, &
-    ! !$OMP p,q,dot,d_radial,d_radial_d_i,d_radial_d_j,d_radial_d_k,s,z, &
-    ! !$OMP d_ijdecay,d_ikdecay) SCHEDULE(dynamic)
+    !$OMP PARALLEL DO PRIVATE(atom_rep, atom_grad, rij, n, rij2, invrij, invrij2,&
+    !$OMP rik, m, rik2, invrik, invrjk, invrik2, a, b, c, angle, cos_i, cos_k,&
+    !$OMP cos_j, radial_base, radial, p, q, dot, angular, d_angular, d_angular_d_j,&
+    !$OMP d_angular_d_k, d_angular_d_i, d_radial, d_radial_d_j, d_radial_d_k,&
+    !$OMP d_radial_d_i, d_ijdecay, d_ikdecay, invr_atm, atm, atm_i, atm_j, atm_k, vi,&
+    !$OMP vj, vk, d_atm_ii, d_atm_ij, d_atm_ik, d_atm_ji, d_atm_jj, d_atm_jk, d_atm_ki,&
+    !$OMP d_atm_kj, d_atm_kk, d_atm_extra_i, d_atm_extra_j, d_atm_extra_k, s, z) SCHEDULE(dynamic)
     do i = unit_loc_index+1, unit_loc_index+natoms
         atom_rep = 0.0d0
         atom_grad = 0.0d0
@@ -2040,7 +2042,7 @@ subroutine fgenerate_fchl_acsf_and_gradients_pbc(coordinatesExt, nuclear_charges
         rep(i-unit_loc_index, twobody_size + 1:) = rep(i-unit_loc_index, twobody_size + 1:) + atom_rep
         grad(i-unit_loc_index, twobody_size + 1:,:,:) = grad(i-unit_loc_index, twobody_size + 1:,:,:) + atom_grad
     enddo
-    ! !$OMP END PARALLEL DO
+    !$OMP END PARALLEL DO
     ! write(*,*) "Three body terms computed successfully"
 
     deallocate(rdecay)
