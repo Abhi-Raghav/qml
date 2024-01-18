@@ -782,7 +782,7 @@ def generate_fchl_acsf_pbc(nuclear_charges, coordinates, elements,
     
     # The get_scaled_positions with wrap will wrap atoms outside the box into inside the box
     coordinates = np.dot(ase_atoms.get_scaled_positions(wrap=True), cell)
-    cut_distance = max(rcut, acut)
+    cut_distance = rcut
     nExtend = (np.floor(cut_distance/np.linalg.norm(cell,2,axis = 0)) + 1).astype(int)
     for i in range(-nExtend[0],nExtend[0] + 1):
         for j in range(-nExtend[1],nExtend[1] + 1):
