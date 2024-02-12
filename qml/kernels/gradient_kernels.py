@@ -31,8 +31,8 @@ from .fgradient_kernels import flocal_kernel
 from .fgradient_kernels import flocal_kernels
 from .fgradient_kernels import fsymmetric_local_kernel
 from .fgradient_kernels import fsymmetric_local_kernels
-from .fgradient_kernels import fatomic_local_kernel
-from .fgradient_kernels import fatomic_local_gradient_kernel
+from .fgradient_kernels import fatomic_local_kernel, fatomic_local_kernel_sp
+from .fgradient_kernels import fatomic_local_gradient_kernel, fatomic_local_gradient_kernel_sp
 from .fgradient_kernels import flocal_gradient_kernel
 from .fgradient_kernels import fgdml_kernel
 from .fgradient_kernels import fsymmetric_gdml_kernel
@@ -346,7 +346,7 @@ def get_local_symmetric_kernel(X1, Q1, SIGMA):
     return K
 
 
-def get_atomic_local_kernel(X1, X2, Q1, Q2, SIGMA):
+def get_atomic_local_kernel(X1, X2, Q1, Q2, SIGMA, sp=False):
 
     """ Calculates the Gaussian kernel matrix K with the local decomposition where :math:`K_{ij}`:
 
@@ -375,6 +375,9 @@ def get_atomic_local_kernel(X1, X2, Q1, Q2, SIGMA):
         :param SIGMA: Gaussian kernel width.
         :type SIGMA: float
 
+        :param sp: Set True to use single precision Float for kernel.
+        :type sp: logical
+
         :return: 2D matrix of kernel elements shape=(N1, N2),
         :rtype: numpy array
     """
@@ -393,8 +396,9 @@ def get_atomic_local_kernel(X1, X2, Q1, Q2, SIGMA):
 
     for i, q in enumerate(Q2):
         Q2_input[:len(q),i] = q
-
-    K = fatomic_local_kernel(
+    
+    if sp == True:
+        K = fatomic_local_kernel_sp(
             X1,
             X2,
             Q1_input,
@@ -405,12 +409,26 @@ def get_atomic_local_kernel(X1, X2, Q1, Q2, SIGMA):
             len(N2),
             np.sum(N1),
             SIGMA
+        )
+
+    else:
+        K = fatomic_local_kernel(
+                X1,
+                X2,
+                Q1_input,
+                Q2_input,
+                N1,
+                N2,
+                len(N1),
+                len(N2),
+                np.sum(N1),
+                SIGMA
     )
 
     return K
 
 
-def get_atomic_local_gradient_kernel(X1, X2, dX2, Q1, Q2, SIGMA):
+def get_atomic_local_gradient_kernel(X1, X2, dX2, Q1, Q2, SIGMA, sp=False):
 
     """ Calculates the Gaussian kernel matrix K with the local decomposition where :math:`K_{ij}`:
 
@@ -439,6 +457,9 @@ def get_atomic_local_gradient_kernel(X1, X2, dX2, Q1, Q2, SIGMA):
         :param SIGMA: Gaussian kernel width.
         :type SIGMA: float
 
+        :param sp: Set True to use single precision Float for kernel.
+        :type sp: logical
+
         :return: 2D matrix of kernel elements shape=(N1, N2),
         :rtype: numpy array
     """
@@ -462,20 +483,38 @@ def get_atomic_local_gradient_kernel(X1, X2, dX2, Q1, Q2, SIGMA):
     original_mkl_threads = mkl_get_num_threads()
     mkl_set_num_threads(1)
 
-    K = fatomic_local_gradient_kernel(
-            X1,
-            X2,
-            dX2,
-            Q1_input,
-            Q2_input,
-            N1,
-            N2,
-            len(N1),
-            len(N2),
-            np.sum(N1),
-            np.sum(N2)*3,
-            SIGMA
+    if sp == True:
+        K = fatomic_local_gradient_kernel_sp(
+        X1,
+        X2,
+        dX2,
+        Q1_input,
+        Q2_input,
+        N1,
+        N2,
+        len(N1),
+        len(N2),
+        np.sum(N1),
+        np.sum(N2)*3,
+        SIGMA
     )
+    
+    else:
+
+        K = fatomic_local_gradient_kernel(
+                X1,
+                X2,
+                dX2,
+                Q1_input,
+                Q2_input,
+                N1,
+                N2,
+                len(N1),
+                len(N2),
+                np.sum(N1),
+                np.sum(N2)*3,
+                SIGMA
+        )
 
     # Reset MKL_NUM_THREADS back to its original value
     mkl_set_num_threads(original_mkl_threads)

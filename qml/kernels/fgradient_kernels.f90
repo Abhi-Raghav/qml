@@ -540,6 +540,73 @@ subroutine fatomic_local_kernel(x1, x2, q1, q2, n1, n2, nm1, nm2, na1, sigma, ke
 
 end subroutine fatomic_local_kernel
 
+subroutine fatomic_local_kernel_sp(x1, x2, q1, q2, n1, n2, nm1, nm2, na1, sigma, kernel)
+
+    implicit none
+
+    double precision, dimension(:,:,:), intent(in) :: x1
+    double precision, dimension(:,:,:), intent(in) :: x2
+
+    integer, dimension(:,:), intent(in) :: q1
+    integer, dimension(:,:), intent(in) :: q2
+
+    integer, dimension(:), intent(in) :: n1
+    integer, dimension(:), intent(in) :: n2
+
+    integer, intent(in) :: nm1
+    integer, intent(in) :: nm2
+    integer, intent(in) :: na1
+
+    double precision, intent(in) :: sigma
+
+    real, dimension(nm2,na1), intent(out) :: kernel
+
+    integer :: j1, j2
+    integer :: a, b
+    integer :: idx1_start, idx1
+
+    integer :: rep_size
+    double precision :: inv_sigma2
+    double precision :: l2
+
+    kernel = 0.0d0
+
+    rep_size = size(x1, dim=3)
+
+    inv_sigma2 = -1.0d0 / (2 * sigma**2)
+
+    !$OMP PARALLEL DO private(idx1_start, idx1, l2) schedule(dynamic)
+    do a = 1, nm1
+
+        idx1_start = sum(n1(:a)) - n1(a)
+
+        ! Molecule 2
+        do b = 1, nm2
+
+            ! Atom in Molecule 1
+            do j1 = 1, n1(a)
+
+                idx1 = idx1_start + j1
+
+                !Atom in Molecule2
+                do j2 = 1, n2(b)
+
+                    if (q1(j1,a) == q2(j2,b)) then
+
+                        l2 = sum((x1(a,j1,:) - x2(b,j2,:))**2)
+                        kernel(b,idx1) = kernel(b,idx1) + exp(l2 * inv_sigma2)
+
+                    endif
+
+                enddo
+            enddo
+
+        enddo
+    enddo
+    !$OMP END PARALLEL do
+
+end subroutine fatomic_local_kernel_sp
+
 
 subroutine fatomic_local_gradient_kernel(x1, x2, dx2, q1, q2, n1, n2, nm1, nm2, na1, naq2, sigma, kernel)
 
@@ -648,6 +715,114 @@ subroutine fatomic_local_gradient_kernel(x1, x2, dx2, q1, q2, n1, n2, nm1, nm2, 
     deallocate(d)
 
 end subroutine fatomic_local_gradient_kernel
+
+subroutine fatomic_local_gradient_kernel_sp(x1, x2, dx2, q1, q2, n1, n2, nm1, nm2, na1, naq2, sigma, kernel)
+
+    implicit none
+
+    double precision, dimension(:,:,:), intent(in) :: x1
+    double precision, dimension(:,:,:), intent(in) :: x2
+
+    double precision, dimension(:,:,:,:,:), intent(in) :: dx2
+
+    integer, dimension(:,:), intent(in) :: q1
+    integer, dimension(:,:), intent(in) :: q2
+
+    integer, dimension(:), intent(in) :: n1
+    integer, dimension(:), intent(in) :: n2
+
+    integer, intent(in) :: nm1
+    integer, intent(in) :: nm2
+    integer, intent(in) :: na1
+    integer, intent(in) :: naq2
+
+    double precision, intent(in) :: sigma
+
+    real, dimension(naq2,na1), intent(out) :: kernel
+
+    integer :: i2, j1, j2
+    integer :: xyz2
+    integer :: a, b
+    integer :: idx1_start, idx2_end, idx2_start, idx2, idx1
+
+    integer :: rep_size
+
+    double precision :: expd
+    double precision :: inv_2sigma2
+    double precision :: inv_sigma2
+
+    double precision, allocatable, dimension(:) :: d
+    double precision, allocatable, dimension(:,:,:,:) :: sorted_derivs
+
+
+    rep_size = size(x1, dim=3)
+    allocate(d(rep_size))
+
+    inv_2sigma2 = -1.0d0 / (2 * sigma**2)
+    inv_sigma2 = -1.0d0 / (sigma**2)
+
+    allocate(sorted_derivs(rep_size,maxval(n2)*3,maxval(n2),nm2))
+
+    sorted_derivs = 0.0d0
+
+    ! Presort the representation derivatives
+    do b = 1, nm2
+        do i2 = 1, n2(b)
+            idx2 = 0
+
+            do j2 = 1, n2(b)
+
+                do xyz2 = 1, 3
+                    idx2 = idx2 + 1
+
+                    sorted_derivs(:,idx2,i2,b) = dx2(b, i2,:,j2,xyz2)
+
+                enddo
+            enddo
+        enddo
+    enddo
+
+    kernel = 0.0d0
+
+    !$OMP PARALLEL DO PRIVATE(idx2_end,idx2_start,d,expd,idx1_start,idx1) schedule(dynamic)
+    do a = 1, nm1
+
+        idx1_start = sum(n1(:a)) - n1(a) + 1
+
+        ! Atom in Molecule 1
+        do j1 = 1, n1(a)
+
+            idx1 = idx1_start - 1 + j1
+
+            ! Molecule 2
+            do b = 1, nm2
+
+                idx2_start = (sum(n2(:b)) - n2(b))*3 + 1
+                idx2_end = sum(n2(:b))*3
+
+                !Atom in Molecule2
+                do j2 = 1, n2(b)
+
+                    if (q1(j1,a) == q2(j2,b)) then
+                        ! Calculate the distance vector, and some intermediate results
+                        d(:) = x1(a,j1,:)- x2(b,j2,:)
+                        expd = inv_sigma2 * exp(sum(d**2) * inv_2sigma2)
+
+                        ! Add the dot product to the kernel in one BLAS call
+                        call dgemv("T", rep_size, n2(b)*3, expd, sorted_derivs(:,:n2(b)*3,j2,b), &
+                            & rep_size, d, 1, 1.0d0, kernel(idx2_start:idx2_end,idx1), 1)
+                    endif
+
+                enddo
+            enddo
+        enddo
+    enddo
+    !$OMP END PARALLEL do
+
+    deallocate(sorted_derivs)
+    deallocate(d)
+
+end subroutine fatomic_local_gradient_kernel_sp
 
 
 ! NOTE: Legacy code without any fancy BLAS calls, for reference
